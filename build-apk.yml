@@ -1,0 +1,41 @@
+name: APK derle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Android proje iskeletini oluştur
+        run: |
+          cp lib/main.dart /tmp/main.dart
+          flutter create --platforms=android --project-name temizlik_takip --org com.temizlik .
+          cp /tmp/main.dart lib/main.dart
+
+      - name: Arama paketi ve Android izni
+        run: |
+          flutter pub add url_launcher audioplayers
+          sed -i 's|<application|<queries><intent><action android:name="android.intent.action.DIAL"/><data android:scheme="tel"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
+
+      - run: flutter pub get
+
+      - run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: temizlik-takip-apk
+          path: build/app/outputs/flutter-apk/app-release.apk

@@ -1,0 +1,78 @@
+rules_version = '2';
+// Temizlik Takip güvenlik kuralları.
+// Rol, giriş yapan hesabın "role" özelliğinde (custom claim) tutulur: 'worker' | 'chief' | 'manager'.
+// Hesapları ve rolleri yalnızca Cloud Functions (createStaff) üretir; istemci rolünü değiştiremez.
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function role() { return request.auth.token.role; }
+    function isManager() { return signedIn() && role() == 'manager'; }
+    function isChief() { return signedIn() && role() == 'chief'; }
+    function myStaff() { return get(/databases/$(db)/documents/staff/$(request.auth.uid)).data; }
+
+    // Personel: yönetici ve şef hepsini, çalışan yalnızca kendisini okur. Yazma: yalnızca yönetici.
+    match /staff/{uid} {
+      allow read: if isManager() || isChief() || (signedIn() && request.auth.uid == uid);
+      allow write: if isManager();
+    }
+
+    // Tanımlar: giriş yapan herkes okur, yalnızca yönetici değiştirir.
+    match /config/{doc} { allow read: if signedIn(); allow write: if isManager(); }
+    match /buildings/{id} { allow read: if signedIn(); allow write: if isManager(); }
+    match /floors/{id} { allow read: if signedIn(); allow write: if isManager(); }
+    match /shifts/{id} { allow read: if signedIn(); allow write: if isManager(); }
+    match /tasks/{id} { allow read: if signedIn(); allow write: if isManager(); }
+
+    // Günlük görev satırları (Cloud Functions her gün üretir).
+    match /days/{day}/units/{unit} {
+      allow read: if isManager() || isChief()
+                  || (signedIn() && resource.data.floorId in myStaff().floors);
+      allow create, delete: if false;
+
+      allow update: if
+        // Yönetici yalnızca kilidi açabilir.
+        (isManager() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['unlocked']))
+        // Çalışan: kendi katındaki görevi, kilitlenmeden önce (ya da yönetici açtıysa) işaretler.
+        || (signedIn() && role() == 'worker'
+            && resource.data.floorId in myStaff().floors
+            && (resource.data.unlocked == true || request.time < resource.data.lockAt)
+            && (
+              // kontrol listesi işaretleme
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['checked'])
+              // ya da tamamlama
+              || (resource.data.done == false
+                  && request.resource.data.done == true
+                  && request.resource.data.doneBy == request.auth.uid
+                  && request.resource.data.doneAt == request.time
+                  && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['done', 'doneAt', 'doneBy', 'checked']))
+            ));
+    }
+
+    // Bildirimler: yalnızca Cloud Functions yazar. Okuyan kişi yalnızca "readBy" alanını günceller.
+    match /notifications/{id} {
+      allow read: if (resource.data.to == 'managers' && (isManager() || isChief()))
+                  || resource.data.to == request.auth.uid;
+      allow update: if signedIn()
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']);
+      allow create, delete: if false;
+    }
+
+    // Mesai: yönetici yazar; yönetici ve şef hepsini, çalışan yalnızca kendi mesaisini okur.
+    match /overtime/{id} {
+      allow read: if isManager() || isChief() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow write: if isManager();
+    }
+
+    // Ödüller: yönetici verir; çalışan yalnızca kendisininkini görür.
+    match /awards/{id} {
+      allow read: if isManager() || isChief() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow write: if isManager();
+    }
+
+    // Aylık başarı özeti (adlar ve sayılar): sıralama için giriş yapan herkes okur, yalnızca Functions yazar.
+    match /perfMonths/{id} { allow read: if signedIn(); allow write: if false; }
+
+    match /days/{day} { allow read: if signedIn(); allow write: if false; }
+  }
+}
